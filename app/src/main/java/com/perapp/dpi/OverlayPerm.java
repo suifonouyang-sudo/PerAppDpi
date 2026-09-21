@@ -1,10 +1,12 @@
 package com.perapp.dpi;
 
+import android.app.AppOpsManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Process;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
@@ -43,8 +45,43 @@ public final class OverlayPerm {
             if (Settings.canDrawOverlays(c)) return true;
         } catch (Throwable ignored) {
         }
-        // 兜底：真的尝试加一个 1px 透明视图，成功即代表权限其实已给（常见于国产 ROM 谎报）
+        // 国产 ROM 常常 canDrawOverlays=false 但 appop 实际是 allow；以 appop 为准
+        if (allowedByAppOps(c)) return true;
+        // 最后兜底：真的尝试加一个 1px 透明视图，成功即代表权限其实已给
         return probe(c);
+    }
+
+    /** 直接查 SYSTEM_ALERT_WINDOW 这个 appop 是否被授予（最可靠的信号，不受 ROM 谎报影响）。 */
+    public static boolean allowedByAppOps(Context c) {
+        if (c == null) return false;
+        try {
+            AppOpsManager am = (AppOpsManager) c.getSystemService(Context.APP_OPS_SERVICE);
+            if (am == null) return false;
+            int mode = am.checkOpNoThrow(AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW,
+                    Process.myUid(), c.getPackageName());
+            return mode == AppOpsManager.MODE_ALLOWED;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 经 Shizuku 以 shell 身份执行 {@code appops set <pkg> SYSTEM_ALERT_WINDOW allow}，
+     * 直接把悬浮窗权限授予到本应用，省掉用户在系统/厂商页里翻找的麻烦。
+     * 调用前必须已授权 Shizuku；未授权会返回 false，由调用方决定是否再走系统页引导。
+     */
+    public static boolean grantViaShizuku(Context c) {
+        if (c == null) return false;
+        if (allowedByAppOps(c) || granted(c)) return true;
+        if (!ShizukuShell.isReady()) return false;
+        try {
+            ShizukuShell.exec(c, "appops set " + c.getPackageName() + " SYSTEM_ALERT_WINDOW allow");
+        } catch (Throwable ignored) {
+            return false;
+        }
+        boolean ok = allowedByAppOps(c) || granted(c);
+        AppLog.i("OVERLAY", "自动授予 SYSTEM_ALERT_WINDOW -> " + (ok ? "OK" : "失败，需手动开启"));
+        return ok;
     }
 
     /** 用 1px 透明视图探测是否真能叠加。成功返回 true；任何异常都视为无权限。 */
