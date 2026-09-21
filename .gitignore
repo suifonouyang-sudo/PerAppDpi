@@ -1,0 +1,12 @@
+# Built artifacts
+build/
+.gradle/
+captures/
+
+# Local machine config
+local.properties
+
+# IDE
+*.iml
+.idea/
+.DS_Store

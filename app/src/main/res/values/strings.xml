@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">单应用DPI</string>
+    <string name="a11y_label">单应用DPI 极速切换</string>
+    <string name="a11y_desc">仅用于识别当前处于前台的应用包名，用于切换该应用的显示密度（DPI）。本服务不读取任何屏幕内容，也不记录输入。</string>
+</resources>
