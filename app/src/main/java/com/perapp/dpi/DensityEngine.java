@@ -151,9 +151,9 @@ public final class DensityEngine {
         Action a = new Action();
         a.pkg = pkg == null ? "" : pkg;
 
-        String self = app.getPackageName();
-        // 本应用自己永远跟随系统密度：否则在设置界面上操作时自己也在变形，体验很糟
-        int want = self.equals(a.pkg) ? 0 : DpiStore.get(app, a.pkg);
+        // 本应用也按自身配置走：顶部「本应用显示密度」可单独调它的界面大小。
+        // 未配置（DpiStore 返回 0）时仍跟随系统密度。
+        int want = DpiStore.get(app, a.pkg);
 
         Info before = read();
         a.before = before.override;

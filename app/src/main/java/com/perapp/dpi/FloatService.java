@@ -36,6 +36,8 @@ public class FloatService extends Service {
 
     public static final String ACT_START = "com.perapp.dpi.FLOAT_START";
     public static final String ACT_STOP = "com.perapp.dpi.FLOAT_STOP";
+    /** 真正添加悬浮窗失败时（多半未获权限）发广播，由 MainActivity 引导去开权限 */
+    public static final String ACT_PERM_FAIL = "com.perapp.dpi.FLOAT_PERM_FAIL";
 
     /** 供 UI 读取的运行状态 */
     public static volatile boolean running;
@@ -135,7 +137,18 @@ public class FloatService extends Service {
         } catch (Throwable t) {
             AppLog.i("FLOAT", "addView 失败（多半未获悬浮窗权限）: " + t);
             panel = null;
+            sendPermFail(t == null ? "" : t.toString());
             return false;
+        }
+    }
+
+    /** 真正加窗失败时通知 UI，引导用户去开悬浮窗权限 */
+    private void sendPermFail(String msg) {
+        try {
+            Intent i = new Intent(ACT_PERM_FAIL);
+            i.putExtra("msg", msg == null ? "" : msg);
+            sendBroadcast(i);
+        } catch (Throwable ignored) {
         }
     }
 

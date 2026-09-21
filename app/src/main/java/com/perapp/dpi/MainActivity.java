@@ -2,10 +2,12 @@ package com.perapp.dpi;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -67,10 +69,32 @@ public class MainActivity extends Activity {
     // 顶栏
     private TextView tvTopStatus;
 
+    // 顶栏下方：本应用密度快捷调节
+    private TextView tvSelfDpi;
+    private Button btnSelfMinus, btnSelfPlus, btnSelfReset;
+    private static final int SELF_STEP = 5;
+
     private final StringBuilder logBuf = new StringBuilder();
 
     /** 悬浮窗权限（SYSTEM_ALERT_WINDOW）申请请求码 */
     private static final int REQ_OVERLAY = 2001;
+
+    /** 已发起悬浮窗权限引导、等待用户回来后重新校验标记 */
+    private boolean awaitingOverlay = false;
+
+    /** 监听悬浮窗真正加窗失败，引导用户去开权限 */
+    private final BroadcastReceiver floatFailRx = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            if (FloatService.ACT_PERM_FAIL.equals(intent.getAction())) {
+                String msg = intent.getStringExtra("msg");
+                ui.post(() -> {
+                    if (swFloat != null) swFloat.setChecked(false);
+                    showOverlayGuide(msg);
+                });
+            }
+        }
+    };
 
     // Shizuku 监听（注册一次，活动销毁时注销）
     private final Shizuku.OnBinderReceivedListener binderRx = () -> ui.post(this::refreshAll);
@@ -102,16 +126,34 @@ public class MainActivity extends Activity {
             AppLog.i("UI", "注册 Shizuku 监听失败（不影响基本功能）: " + t);
         }
 
+        try {
+            registerReceiver(floatFailRx, new IntentFilter(FloatService.ACT_PERM_FAIL), Context.RECEIVER_NOT_EXPORTED);
+        } catch (Throwable t) {
+            AppLog.i("UI", "注册悬浮窗失败监听失败: " + t);
+        }
+
         tvTopStatus = findViewById(R.id.tvTopStatus);
         setupTabs();
         setupApps();
         setupRun();
         setupLog();
+        setupSelfDpi();
 
         showPage(0);
 
         // 后台载入应用清单，避免阻塞首帧
         new Thread(this::loadApps).start();
+
+        // 启动时按已保存的本应用密度套用一次（仅当 Shizuku 已就绪）
+        new Thread(() -> {
+            if (ShizukuShell.isReady()) {
+                int saved = DpiStore.get(this, selfPkg());
+                if (saved > 0) {
+                    new DensityEngine(this).apply(saved);
+                    ui.post(this::refreshSelfDpi);
+                }
+            }
+        }).start();
 
         ui.post(foreTicker);
     }
@@ -120,6 +162,12 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshAll();
+        // 从权限设置页回来后重新校验：部分 ROM 的 onActivityResult 不触发，这里兜底
+        if (awaitingOverlay && OverlayPerm.granted(this)) {
+            awaitingOverlay = false;
+            if (swFloat != null) swFloat.setChecked(true);
+            startFloat();
+        }
     }
 
     @Override
@@ -131,6 +179,10 @@ public class MainActivity extends Activity {
             Shizuku.removeBinderReceivedListener(binderRx);
             Shizuku.removeBinderDeadListener(binderDead);
             Shizuku.removeRequestPermissionResultListener(permRx);
+        } catch (Throwable ignored) {
+        }
+        try {
+            unregisterReceiver(floatFailRx);
         } catch (Throwable ignored) {
         }
     }
@@ -434,7 +486,7 @@ public class MainActivity extends Activity {
 
         tvHelp.setText("原理：Android 没有「按包名」的密度接口，系统里唯一的密度入口是 wm density（按屏、不按应用）。"
                 + "因此本工具的做法是——监听当前前台应用，进入你托管的应用时把屏幕密度切到该应用的值，离开时还原。\n\n"
-                + "• 本应用自身永远跟随系统密度，避免设置界面自己变形。\n"
+                + "• 顶部「本应用显示密度」可单独调整本工具自己的界面大小，方便在小屏/高分屏上操作；未设置时仍跟随系统。\n"
                 + "• 监控停止时只还原「本应用改过」的密度，你手动在系统里设的密度原样保留。\n"
                 + "• 识别方式分两种：无障碍（极速，切到托管应用即时生效）与使用情况统计（零操作授权，约 0.5 秒延迟）。\n"
                 + "• 切换密度会让目标应用重建界面，过程中可能有一次明显闪烁，属正常现象。");
@@ -483,20 +535,29 @@ public class MainActivity extends Activity {
                 swFloat.setChecked(false);
                 return;
             }
-            if (!Settings.canDrawOverlays(this)) {
-                toast("需要「显示在其他应用上层」权限");
-                try {
-                    startActivityForResult(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            android.net.Uri.parse("package:" + getPackageName())), REQ_OVERLAY);
-                } catch (Throwable t) {
-                    toast("无法打开悬浮窗权限设置: " + t);
-                }
+            if (OverlayPerm.granted(this)) {
+                startFloat();
+            } else {
+                // 未获权限：先尝试厂商专用页，拿不到再回退到系统设置页；
+                // 回来后由 onResume / onActivityResult 重新校验
+                awaitingOverlay = true;
                 swFloat.setChecked(false);
-                return;
+                openOverlaySettings();
             }
-            startFloat();
         } else {
             startService(new Intent(this, FloatService.class).setAction(FloatService.ACT_STOP));
+        }
+    }
+
+    private void openOverlaySettings() {
+        // 优先深链到厂商自家的悬浮窗权限页；失败再回退到系统 ACTION_MANAGE_OVERLAY_PERMISSION
+        boolean oem = OverlayPerm.openOemSettings(this);
+        if (!oem) {
+            try {
+                startActivityForResult(OverlayPerm.settingsIntent(this), REQ_OVERLAY);
+            } catch (Throwable t) {
+                toast("无法打开悬浮窗权限设置: " + t);
+            }
         }
     }
 
@@ -508,13 +569,40 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_OVERLAY) {
-            if (Settings.canDrawOverlays(this)) {
+            if (OverlayPerm.granted(this)) {
+                awaitingOverlay = false;
                 startFloat();
             } else {
+                awaitingOverlay = false;
                 swFloat.setChecked(false);
-                toast("未授予「显示在其他应用上层」权限，无法开启悬浮窗");
+                toast("仍未获得「显示在其他应用上层」权限，悬浮窗无法开启");
+                showOverlayGuide(null);
             }
         }
+    }
+
+    /** 悬浮窗权限未授予时的引导对话框，给出具体路径并再次拉起设置 */
+    private void showOverlayGuide(String detail) {
+        String mf = android.os.Build.MANUFACTURER == null ? "" : android.os.Build.MANUFACTURER.toLowerCase();
+        StringBuilder sb = new StringBuilder();
+        sb.append("请到「设置 → 应用 → 本应用 → 显示在其他应用上层（悬浮窗）」中允许权限，然后返回本应用再打开悬浮窗。\n\n");
+        sb.append("部分国产系统（小米 / 华为 / OPPO / vivo / 魅族等）需要到系统「权限管理」单独开启「悬浮窗」，仅系统设置页可能不生效。\n\n");
+        if (mf.contains("xiaomi") || mf.contains("redmi")) {
+            sb.append("小米/Redmi：设置 → 应用设置 → 权限管理 → 悬浮窗 → 允许。\n\n");
+        } else if (mf.contains("huawei") || mf.contains("honor")) {
+            sb.append("华为：设置 → 应用 → 应用管理 → 本应用 → 权限 → 悬浮窗 → 允许。\n\n");
+        } else if (mf.contains("oppo") || mf.contains("realme") || mf.contains("oneplus")) {
+            sb.append("OPPO/realme/一加：设置 → 权限管理 → 悬浮窗 → 允许。\n\n");
+        } else if (mf.contains("vivo")) {
+            sb.append("vivo/iQOO：设置 → 应用与权限 → 权限管理 → 悬浮窗 → 允许。\n\n");
+        }
+        if (detail != null && !detail.isEmpty()) sb.append("技术信息：").append(detail);
+        new AlertDialog.Builder(this)
+                .setTitle("开启悬浮窗权限")
+                .setMessage(sb.toString())
+                .setPositiveButton("去设置", (d, w) -> openOverlaySettings())
+                .setNegativeButton("知道了", null)
+                .show();
     }
 
     private void refreshRunPage() {
@@ -525,7 +613,7 @@ public class MainActivity extends Activity {
         swFloat.setChecked(FloatService.running);
         tvFloatState.setText(FloatService.running
                 ? "已开启 · 悬浮于其它应用之上"
-                : (Settings.canDrawOverlays(this) ? "未开启" : "未开启（需悬浮窗权限）"));
+                : (OverlayPerm.granted(this) ? "未开启" : "未开启（需悬浮窗权限）"));
         rebuildModeChips();
         refreshEnv();
     }
@@ -617,10 +705,74 @@ public class MainActivity extends Activity {
         tvLog.setText(logBuf.toString());
     }
 
+    // ---------------- 本应用密度 ----------------
+
+    private String selfPkg() {
+        return getPackageName(); // com.perapp.dpi
+    }
+
+    private void setupSelfDpi() {
+        tvSelfDpi = findViewById(R.id.tvSelfDpi);
+        btnSelfMinus = findViewById(R.id.btnSelfMinus);
+        btnSelfPlus = findViewById(R.id.btnSelfPlus);
+        btnSelfReset = findViewById(R.id.btnSelfReset);
+        btnSelfMinus.setOnClickListener(v -> changeSelfDpi(-SELF_STEP));
+        btnSelfPlus.setOnClickListener(v -> changeSelfDpi(+SELF_STEP));
+        btnSelfReset.setOnClickListener(v -> resetSelfDpi());
+        refreshSelfDpi();
+    }
+
+    private void refreshSelfDpi() {
+        int cur = DpiStore.get(this, selfPkg());
+        DensityEngine.Info info = new DensityEngine(this).read();
+        if (cur > 0) {
+            tvSelfDpi.setText(cur + " dpi");
+            tvSelfDpi.setTextColor(getColor(R.color.primary));
+        } else {
+            tvSelfDpi.setText("跟随系统（" + info.effective() + "）");
+            tvSelfDpi.setTextColor(getColor(R.color.text_dim));
+        }
+    }
+
+    private void changeSelfDpi(int delta) {
+        if (!ShizukuShell.isReady()) {
+            ensureShizuku();
+            return;
+        }
+        int cur = DpiStore.get(this, selfPkg());
+        DensityEngine.Info info = new DensityEngine(this).read();
+        // 从未配置时起调基于系统当前有效密度，避免一次跨太大
+        int base = cur > 0 ? cur : info.effective();
+        int next = DensityEngine.clamp(base + delta);
+        DpiStore.set(this, selfPkg(), next);
+        AppLog.i("UI", "本应用密度 -> " + next + "dpi");
+        final int apply = next;
+        new Thread(() -> {
+            new DensityEngine(this).apply(apply);
+            ui.post(this::refreshSelfDpi);
+        }).start();
+        bumpService();
+    }
+
+    private void resetSelfDpi() {
+        if (!ShizukuShell.isReady()) {
+            ensureShizuku();
+            return;
+        }
+        DpiStore.remove(this, selfPkg());
+        AppLog.i("UI", "本应用密度 -> 跟随系统");
+        new Thread(() -> {
+            new DensityEngine(this).reset();
+            ui.post(this::refreshSelfDpi);
+        }).start();
+        bumpService();
+    }
+
     // ---------------- 通用 ----------------
 
     private void refreshAll() {
         refreshTopStatus();
+        refreshSelfDpi();
         if (findViewById(R.id.pageRun).getVisibility() == View.VISIBLE) refreshRunPage();
     }
 
