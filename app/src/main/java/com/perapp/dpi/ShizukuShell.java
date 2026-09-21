@@ -77,11 +77,19 @@ public final class ShizukuShell {
     /**
      * 需要输出的命令。输出先落到文件再回收 —— 部分命令（am/pm 等）会 fork 出持有写端的
      * 子进程，直接读流会永久阻塞在 EOF 等待上。
+     *
+     * <p>输出文件固定写到 {@code /data/local/tmp/}：
+     * <ul>
+     *   <li>shell（uid 2000，shizuku_server 的身份）一定能写——避免 Android 13 scoped storage
+     *       下 {@code getExternalFilesDir} 在 shell 视角下不可写、或能写但触发
+     *       {@code Failure calling service window: Failed transaction} 导致 wm 命令失败的问题；</li>
+     *   <li>app 本进程能读——{@code /data/local/tmp/} 对所有 app 可读；</li>
+     *   <li>无需任何权限。</li>
+     * </ul>
      */
     public static Res exec(Context ctx, String cmd) {
-        File dir = ctx.getExternalFilesDir(null);
-        if (dir != null && !dir.exists()) dir.mkdirs();
-        File f = new File(dir, "sh_" + Thread.currentThread().getId() + "_" + System.nanoTime() + ".out");
+        File f = new File("/data/local/tmp",
+                "perappdpi_" + Thread.currentThread().getId() + "_" + System.nanoTime() + ".out");
         String wrap = "{ " + cmd + " ; echo \"@@RC=$?\"; } > '" + f.getAbsolutePath() + "' 2>&1";
         int rc = run(wrap);
         String txt = read(f);
