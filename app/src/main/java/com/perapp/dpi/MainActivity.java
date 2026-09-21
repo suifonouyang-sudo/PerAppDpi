@@ -489,7 +489,8 @@ public class MainActivity extends Activity {
                 + "• 顶部「本应用显示密度」可单独调整本工具自己的界面大小，方便在小屏/高分屏上操作；未设置时仍跟随系统。\n"
                 + "• 监控停止时只还原「本应用改过」的密度，你手动在系统里设的密度原样保留。\n"
                 + "• 识别方式分两种：无障碍（极速，切到托管应用即时生效）与使用情况统计（零操作授权，约 0.5 秒延迟）。\n"
-                + "• 切换密度会让目标应用重建界面，过程中可能有一次明显闪烁，属正常现象。");
+                + "• 切换密度会让目标应用重建界面，过程中可能有一次明显闪烁，属正常现象。\n"
+                + "• 开启悬浮窗时，会优先通过 Shizuku 以 shell 身份自动授予 SYSTEM_ALERT_WINDOW，绝大多数设备（含国产 ROM）一步到位，不用去系统/厂商设置页翻找。");
 
         tvAdb.setText("adb shell am start-service -n com.perapp.dpi/.WatchService --es a com.perapp.dpi.START\n"
                 + "adb shell am start-service -n com.perapp.dpi/.WatchService --es a com.perapp.dpi.STOP\n"
@@ -537,13 +538,25 @@ public class MainActivity extends Activity {
             }
             if (OverlayPerm.granted(this)) {
                 startFloat();
-            } else {
-                // 未获权限：先尝试厂商专用页，拿不到再回退到系统设置页；
-                // 回来后由 onResume / onActivityResult 重新校验
-                awaitingOverlay = true;
-                swFloat.setChecked(false);
-                openOverlaySettings();
+                return;
             }
+            swFloat.setChecked(false);
+            // Shizuku 已拿到：直接以 shell 身份 appops set SYSTEM_ALERT_WINDOW allow，
+            // 绝大多数设备（含国产 ROM）这一步就够，不用再让用户去系统/厂商页翻找
+            new Thread(() -> {
+                final boolean ok = OverlayPerm.grantViaShizuku(this);
+                ui.post(() -> {
+                    if (ok || OverlayPerm.granted(this)) {
+                        AppLog.i("UI", "经 Shizuku 自动授予悬浮窗权限");
+                        toast("已自动授予悬浮窗权限");
+                        startFloat();
+                    } else {
+                        AppLog.i("UI", "Shizuku 自动授予失败，转人工引导");
+                        awaitingOverlay = true;
+                        openOverlaySettings();
+                    }
+                });
+            }).start();
         } else {
             startService(new Intent(this, FloatService.class).setAction(FloatService.ACT_STOP));
         }
